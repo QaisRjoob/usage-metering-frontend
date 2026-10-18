@@ -1,0 +1,58 @@
+# Rendered at container start by the nginx image: ${PORT}, ${API_UPSTREAM}, ${API_ORIGIN} and the
+# REAL_IP_FROM values come from the environment (defaults in the Dockerfile suit docker compose).
+server {
+  listen ${PORT};
+  listen [::]:${PORT};
+  server_name _;
+  root /usr/share/nginx/html;
+  index index.html;
+  server_tokens off;
+
+  # Behind a hosting edge proxy (e.g. Railway) the client address arrives in X-Forwarded-For. Only
+  # these sources are believed; the defaults (loopback) mean "no edge proxy", as with docker compose.
+  set_real_ip_from ${REAL_IP_FROM};
+  set_real_ip_from ${REAL_IP_FROM_V6};
+  real_ip_header X-Forwarded-For;
+
+  # Security headers. They live at server level and no location below uses add_header, because
+  # nginx drops inherited add_header directives in any block that declares its own.
+  add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' ${API_ORIGIN}; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'" always;
+  add_header X-Content-Type-Options "nosniff" always;
+  add_header X-Frame-Options "DENY" always;
+  add_header Referrer-Policy "no-referrer" always;
+  add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()" always;
+  add_header Cross-Origin-Opener-Policy "same-origin" always;
+
+  # The API is served from the same origin as the app, so the browser never makes a cross-origin
+  # request (no CORS, and the SameSite=Strict refresh cookie belongs to this site). API_UPSTREAM is
+  # the backend's address: a local backend (http://host.docker.internal:3000) or a public HTTPS URL.
+  location /api/ {
+    proxy_pass ${API_UPSTREAM};
+    proxy_http_version 1.1;
+    # The upstream's own host name, so a hosted backend behind its own edge proxy is routed correctly.
+    proxy_set_header Host $proxy_host;
+    proxy_ssl_server_name on;
+    # Overwrite, never append: the API trusts this header only from nginx, so clients cannot fake it.
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    # The API sends its own copies of these; keep the page's values only.
+    proxy_hide_header X-Frame-Options;
+    proxy_hide_header X-Content-Type-Options;
+    proxy_hide_header Referrer-Policy;
+    proxy_hide_header Cross-Origin-Opener-Policy;
+    # Long enough for a slow AI advisor answer (provider timeout, one retry).
+    proxy_read_timeout 120s;
+  }
+
+  # Hashed build assets can be cached for a long time (expires sets Cache-Control without add_header).
+  location /assets/ {
+    expires 1y;
+    try_files $uri =404;
+  }
+
+  # Single-page app: unknown paths fall back to index.html (React Router handles them).
+  location / {
+    expires -1;
+    try_files $uri /index.html;
+  }
+}

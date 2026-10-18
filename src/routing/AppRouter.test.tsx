@@ -1,0 +1,281 @@
+import { screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { credentials } from '@/services/api/credentials';
+import { resetMockDb } from '@/services/mock/mockRuntime';
+import { DEMO_ACCOUNT_ID, DEMO_API_KEY, MOCK_ADMIN_TOKEN } from '@/services/mock/mockSeed';
+import { renderWithProviders } from '@/test/renderWithProviders';
+import { signInAsAccount, signInAsOperator } from '@/test/session';
+import { AppRouter } from './AppRouter';
+
+
+beforeEach(() => {
+  resetMockDb();
+});
+
+describe('operator interface (/admin)', () => {
+  it.each([
+    ['/admin', 'Dashboard'],
+    ['/admin/accounts', 'Accounts'],
+    [`/admin/accounts/${DEMO_ACCOUNT_ID}`, 'شركة الوثائق التجريبية'],
+    ['/admin/users', 'Users directory'],
+    [`/admin/accounts/${DEMO_ACCOUNT_ID}/users/ahmad`, 'ahmad'],
+    ['/admin/companies', 'Company statistics'],
+    ['/admin/plans', 'Plan catalogue'],
+    ['/admin/usage', 'Usage history'],
+    ['/admin/advisor', 'AI Usage Advisor'],
+  ])('%s renders "%s"', async (route, heading) => {
+    signInAsOperator();
+    renderWithProviders(<AppRouter />, { route });
+    expect(await screen.findByRole('heading', { level: 1, name: heading }, { timeout: 15_000 })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Plan catalogue/ })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /Client Demo/ })).not.toBeInTheDocument();
+  });
+});
+
+describe('account interface (/app)', () => {
+  it.each([
+    ['/app', 'Welcome, شركة الوثائق التجريبية'],
+    ['/app/users', 'Users'],
+    ['/app/users/ahmad', 'ahmad'],
+    ['/app/plans', 'Plans'],
+    ['/app/quotas', 'Quotas'],
+    ['/app/usage', 'Usage history'],
+    ['/app/demo', 'Client Demo — Document Processor'],
+    ['/app/advisor', 'AI Usage Advisor'],
+  ])('%s renders "%s"', async (route, heading) => {
+    signInAsAccount();
+    renderWithProviders(<AppRouter />, { route });
+    expect(await screen.findByRole('heading', { level: 1, name: heading }, { timeout: 15_000 })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /^Accounts$/ })).not.toBeInTheDocument();
+  });
+});
+
+describe('role separation', () => {
+  it('sends a company owner who opens an operator page to their own portal', async () => {
+    signInAsAccount();
+    renderWithProviders(<AppRouter />, { route: '/admin/accounts' });
+    expect(await screen.findByRole('heading', { level: 1, name: 'Welcome, شركة الوثائق التجريبية' })).toBeInTheDocument();
+  });
+
+  it('sends the operator who opens an account page to the operator console', async () => {
+    signInAsOperator();
+    renderWithProviders(<AppRouter />, { route: '/app/users' });
+    expect(await screen.findByRole('heading', { level: 1, name: 'Dashboard' })).toBeInTheDocument();
+  });
+
+  it('sends anonymous visitors to the login page', async () => {
+    renderWithProviders(<AppRouter />, { route: '/app/plans' });
+    expect(await screen.findByLabelText('Access token or API key')).toBeInTheDocument();
+  });
+
+  it('ends the session and returns to the login page when the server rejects the access token', async () => {
+    credentials.setSession({ accessToken: 'a-token-the-server-does-not-accept', expiresIn: 900, role: 'operator' });
+    renderWithProviders(<AppRouter />, { route: '/admin/accounts' });
+    expect(await screen.findByRole('heading', { level: 1, name: 'Welcome back' }, { timeout: 15_000 })).toBeInTheDocument();
+    expect(credentials.get().accessToken).toBeNull();
+  });
+
+  it('signing in as one role ends the other session', () => {
+    signInAsOperator();
+    signInAsAccount();
+    expect(credentials.get().role).toBe('account');
+    signInAsOperator();
+    expect(credentials.get()).toMatchObject({ role: 'operator', account: null });
+  });
+
+  it('keeps the access token in memory only (nothing secret in web storage)', () => {
+    signInAsOperator();
+    const stored = JSON.stringify({ ...window.sessionStorage }) + JSON.stringify({ ...window.localStorage });
+    expect(stored).not.toContain(credentials.get().accessToken!);
+  });
+});
+
+describe('single-field login (the server decides the interface)', () => {
+  const field = () => screen.findByLabelText('Access token or API key');
+  const signIn = () => screen.getByRole('button', { name: /^Sign in$/ });
+
+  it('opens the operator console for the operator token, on the page that was requested', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<AppRouter />, { route: '/admin/plans' });
+    await user.type(await field(), MOCK_ADMIN_TOKEN);
+    await user.click(signIn());
+    expect(await screen.findByRole('heading', { level: 1, name: 'Plan catalogue' })).toBeInTheDocument();
+    // The operator token was exchanged for an access token; the token itself is not kept.
+    expect(credentials.get()).toMatchObject({ role: 'operator', accessToken: 'mock-access.operator' });
+    expect(JSON.stringify(credentials.get())).not.toContain(MOCK_ADMIN_TOKEN);
+  });
+
+  it('opens the account portal for a company API key, and signs out again', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<AppRouter />, { route: '/login' });
+    await user.type(await field(), DEMO_API_KEY);
+    await user.click(signIn());
+    expect(await screen.findByRole('heading', { level: 1, name: 'Welcome, شركة الوثائق التجريبية' })).toBeInTheDocument();
+    expect(credentials.get().account?.accountName).toBe('شركة الوثائق التجريبية');
+    expect(JSON.stringify(credentials.get())).not.toContain(DEMO_API_KEY);
+    await user.click(screen.getByRole('button', { name: /Sign out/ }));
+    expect(await field()).toBeInTheDocument();
+    expect(credentials.get()).toMatchObject({ accessToken: null, account: null });
+  });
+
+  it('ignores a requested page that belongs to the other interface', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<AppRouter />, { route: '/admin/accounts' });
+    await user.type(await field(), DEMO_API_KEY);
+    await user.click(signIn());
+    expect(await screen.findByRole('heading', { level: 1, name: 'Welcome, شركة الوثائق التجريبية' })).toBeInTheDocument();
+  });
+
+  it('rejects an unknown token with one generic message and stores nothing', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<AppRouter />, { route: '/login' });
+    await user.type(await field(), 'umk_live_not_a_real_key_at_all');
+    await user.click(signIn());
+    expect(await screen.findByText('This is neither a valid API key nor the operator token.')).toBeInTheDocument();
+    expect(credentials.get()).toMatchObject({ accessToken: null, role: null, account: null });
+  });
+});
+
+describe('server-side filters, sorting and pagination', () => {
+  it('paginates accounts and disables invalid navigation', async () => {
+    const user = userEvent.setup();
+    signInAsOperator();
+    renderWithProviders(<AppRouter />, { route: '/admin/accounts?pageSize=10' });
+    expect(await screen.findByText(/Showing 1–10 of 13/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Previous page' })).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: 'Next page' }));
+    expect(await screen.findByText(/Showing 11–13 of 13/)).toBeInTheDocument();
+  });
+
+  it('filters accounts by plan type with a removable chip, and clears it', async () => {
+    const user = userEvent.setup();
+    signInAsOperator();
+    renderWithProviders(<AppRouter />, { route: '/admin/accounts?planKind=custom' });
+    expect(await screen.findByText('1 result')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'شركة الوثائق التجريبية' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Remove filter Plan type: custom' }));
+    expect(await screen.findByText('13 results')).toBeInTheDocument();
+  });
+
+  it('shows an inline error instead of requesting an invalid range', async () => {
+    signInAsOperator();
+    renderWithProviders(<AppRouter />, { route: '/admin/accounts?minUtilization=90&maxUtilization=10' });
+    expect(await screen.findByText('Fix the highlighted filter to see results.')).toBeInTheDocument();
+    expect(screen.getByText('maxUtilization must be greater than or equal to minUtilization')).toBeInTheDocument();
+  });
+
+  it('sorts by clicking a column header (aria-sort reflects it)', async () => {
+    const user = userEvent.setup();
+    signInAsOperator();
+    renderWithProviders(<AppRouter />, { route: '/admin/accounts' });
+    const header = await screen.findByRole('button', { name: /Utilization/ });
+    await user.click(header);
+    await waitFor(() => expect(header.closest('th')).toHaveAttribute('aria-sort', 'descending'));
+    await user.click(header);
+    await waitFor(() => expect(header.closest('th')).toHaveAttribute('aria-sort', 'ascending'));
+  });
+
+  it('filters history to rejections by a user limit', async () => {
+    const user = userEvent.setup();
+    signInAsOperator();
+    renderWithProviders(<AppRouter />, { route: '/admin/usage' });
+    await screen.findByRole('heading', { level: 1, name: 'Usage history' }, { timeout: 15_000 });
+    const rejectedBy = screen.getByRole('radiogroup', { name: 'Rejected by' });
+    await user.click(within(rejectedBy).getByRole('radio', { name: 'User limit' }));
+    expect(await screen.findByRole('button', { name: 'Remove filter Rejected by: User (individual)' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Remove filter Outcome: rejected' })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByRole('row').length).toBeGreaterThan(1));
+    for (const row of screen.getAllByRole('row').slice(1)) {
+      expect(within(row).getByText('Rejected')).toBeInTheDocument();
+      expect(within(row).getByText('User (individual)')).toBeInTheDocument();
+    }
+  });
+
+  it('finds a company by one of its users (display name) from the accounts search', async () => {
+    signInAsOperator();
+    renderWithProviders(<AppRouter />, { route: '/admin/accounts?search=%D8%B9%D9%85%D8%B1%20%D8%AD%D8%AF%D8%A7%D8%AF' });
+    expect(await screen.findByText('1 result')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'شركة الوثائق التجريبية' })).toBeInTheDocument();
+  });
+
+  it('browses accounts by category tabs that show server-side counts', async () => {
+    const user = userEvent.setup();
+    signInAsOperator();
+    renderWithProviders(<AppRouter />, { route: '/admin/accounts' });
+    const activity = await screen.findByRole('radiogroup', { name: 'Activity this month' });
+    const all = await within(activity).findByRole('radio', { name: 'All 13' });
+    expect(all).toHaveAttribute('aria-checked', 'true');
+    const custom = within(screen.getByRole('radiogroup', { name: 'Plan' })).getByRole('radio', { name: 'الرصيد المشترك التجريبي (شركة الوثائق التجريبية) 1' });
+    await user.click(custom);
+    expect(await screen.findByText('1 result')).toBeInTheDocument();
+    expect(custom).toHaveAttribute('aria-checked', 'true');
+  });
+
+  it('lists users of every company and opens the company from a row', async () => {
+    const user = userEvent.setup();
+    signInAsOperator();
+    renderWithProviders(<AppRouter />, { route: `/admin/users?search=${encodeURIComponent('سارة النجار')}` });
+    expect(await screen.findByText('1 result', {}, { timeout: 15_000 })).toBeInTheDocument();
+    expect(screen.getByText('sara')).toBeInTheDocument();
+    await user.click(screen.getByRole('link', { name: 'شركة الوثائق التجريبية' }));
+    expect(await screen.findByRole('heading', { level: 1, name: 'شركة الوثائق التجريبية' })).toBeInTheDocument();
+  });
+
+  it('jumps to a company from the operator header finder', async () => {
+    const user = userEvent.setup();
+    signInAsOperator();
+    renderWithProviders(<AppRouter />, { route: '/admin' });
+    const finder = await screen.findByRole('combobox', { name: 'Find a company or user' });
+    await user.type(finder, 'الوثائق');
+    await user.click(await screen.findByRole('option', { name: /شركة الوثائق التجريبية/ }));
+    expect(await screen.findByRole('heading', { level: 1, name: 'شركة الوثائق التجريبية' })).toBeInTheDocument();
+  });
+
+  it('opens a user of a company with statistics and request history', async () => {
+    const user = userEvent.setup();
+    signInAsOperator();
+    renderWithProviders(<AppRouter />, { route: `/admin/accounts/${DEMO_ACCOUNT_ID}` });
+    expect(await screen.findByRole('heading', { name: 'Company statistics' }, { timeout: 15_000 })).toBeInTheDocument();
+    await user.click(await screen.findByRole('button', { name: 'Details of sara' }));
+    expect(await screen.findByRole('heading', { level: 1, name: 'sara' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Request history' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Last six months' })).toBeInTheDocument();
+    // The seeded demo company has no traffic yet, so the history shows its empty state.
+    expect(await screen.findByText('No requests in this month')).toBeInTheDocument();
+  });
+
+  it('shows statistics of every company with totals, sorted on the server', async () => {
+    const user = userEvent.setup();
+    signInAsOperator();
+    renderWithProviders(<AppRouter />, { route: '/admin/companies' });
+    expect(await screen.findByText('13 results', {}, { timeout: 15_000 })).toBeInTheDocument();
+    expect(screen.getByText('Companies')).toBeInTheDocument();
+    const header = screen.getByRole('button', { name: /Rejection rate/ });
+    await user.click(header);
+    await waitFor(() => expect(header.closest('th')).toHaveAttribute('aria-sort', 'descending'));
+    await user.click(within(screen.getByRole('radiogroup', { name: 'Activity' })).getByRole('radio', { name: 'No requests' }));
+    expect(await screen.findByRole('button', { name: 'Remove filter Activity: inactive' })).toBeInTheDocument();
+  });
+
+  it('browses the company\'s own users by category and opens one of them', async () => {
+    const user = userEvent.setup();
+    signInAsAccount();
+    renderWithProviders(<AppRouter />, { route: '/app/users' });
+    const plan = await screen.findByRole('radiogroup', { name: 'User plan' }, { timeout: 15_000 });
+    const premium = await within(plan).findByRole('radio', { name: 'Premium 1' });
+    await user.click(premium);
+    expect(await screen.findByText('1 result')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Remove filter Plan: Premium' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Details of sara' }));
+    expect(await screen.findByRole('heading', { level: 1, name: 'sara' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Request history' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'All users' })).toBeInTheDocument();
+  });
+
+  it('shows the mock data badge in mock mode', async () => {
+    signInAsOperator();
+    renderWithProviders(<AppRouter />, { route: '/admin' });
+    expect(await screen.findByText('MOCK DATA')).toBeInTheDocument();
+  });
+});

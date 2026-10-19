@@ -19,6 +19,22 @@
 
 ---
 
+## Live demo
+
+| What | URL |
+|---|---|
+| Web app | https://usage-metering-frontend-w270.onrender.com |
+| API | https://usage-metering-backend.onrender.com/api/v1 |
+| API docs (Swagger UI) | https://usage-metering-backend.onrender.com/docs |
+| Health check | https://usage-metering-backend.onrender.com/api/v1/ready |
+
+The login page has a **Test accounts** box for one-click sign-in. Code:
+[backend](https://github.com/QaisRjoob/usage-metering-backend) ·
+[main project](https://github.com/QaisRjoob/usage-metering-service).
+
+Render's free plan sleeps after about 15 minutes without traffic, so the first request can take up
+to a minute.
+
 ## Overview
 
 The web app for the **Usage Metering & Quota Service**. It talks to the
@@ -74,7 +90,7 @@ npm run dev:api-mode
 ```
 
 That serves http://localhost:5174 and forwards `/api` to `http://localhost:3000`. To use a hosted
-backend instead, set `API_PROXY_TARGET`, e.g. `API_PROXY_TARGET=https://your-backend.up.railway.app`.
+backend instead, set `API_PROXY_TARGET`, e.g. `API_PROXY_TARGET=https://usage-metering-backend.onrender.com`.
 
 ### With Docker
 
@@ -101,7 +117,7 @@ Open http://localhost:8080. By default nginx forwards `/api` to a backend on the
 
 | Variable | Default | Description |
 |---|---|---|
-| `API_UPSTREAM` | `http://host.docker.internal:3000` | Backend address for `/api/*`, e.g. `https://your-backend.up.railway.app` |
+| `API_UPSTREAM` | `http://host.docker.internal:3000` | Backend address for `/api/*`, e.g. `https://usage-metering-backend.onrender.com` |
 | `PORT` | `80` | Port nginx listens on (hosting platforms set it) |
 | `REAL_IP_FROM` / `REAL_IP_FROM_V6` | loopback | Edge proxy addresses whose `X-Forwarded-For` is believed |
 | `API_ORIGIN` | – | Extra origin allowed in the CSP `connect-src` (not needed with the proxy) |
@@ -131,19 +147,36 @@ When the API contract changes, update `src/contracts` in the backend and copy th
 | Lint | `npm run lint` |
 | Production build | `npm run build` |
 
-## Deploy (Railway)
+## Deploy (Render)
 
-Deploy the backend first and copy its public URL. Then add this repository to a Railway project
-(*New → GitHub repo*); the `Dockerfile` in the root is used automatically. Set the variables:
+Deploy the backend first and copy its public URL. Then create a **Static Site** from this repository:
+
+| Setting | Value |
+|---|---|
+| Build command | `npm ci && npm run build` |
+| Publish directory | `dist` |
+
+Set the variables (Vite bakes them in at build time):
 
 | Variable | Value |
 |---|---|
-| `API_UPSTREAM` | the backend's public URL, e.g. `https://your-backend.up.railway.app` |
-| `REAL_IP_FROM` / `REAL_IP_FROM_V6` | `0.0.0.0/0` / `::/0` (believe Railway's edge proxy) |
+| `NODE_VERSION` | `22` |
+| `VITE_DATA_SOURCE` | `api` |
+| `VITE_API_BASE_URL` | `/api/v1` |
 | `VITE_DEMO_API_KEY` | `umk_demo_local_only_do_not_use_in_production` when the backend seeds the demo data |
 | `VITE_DEMO_OPERATOR_TOKEN` | optional: the backend's `ADMIN_API_TOKEN`, to show an operator test account |
 
-Finally *Settings → Networking → Generate Domain*. Railway sets `PORT`, and nginx listens on it.
+Add these rules under *Redirects/Rewrites*, in this order:
+
+| Source | Destination | Action |
+|---|---|---|
+| `/api/*` | `https://usage-metering-backend.onrender.com/api/*` | Rewrite |
+| `/*` | `/index.html` | Rewrite |
+
+The first rule proxies the API on the same origin, so the `SameSite=Strict` refresh cookie works;
+the second serves the single-page app for every route.
+
+The Docker image (nginx, with `API_UPSTREAM` pointing at the backend) also works on any Docker host.
 
 ---
 
